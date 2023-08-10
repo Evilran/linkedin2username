@@ -29,7 +29,7 @@ BANNER = r"""
                                linkedin2username
 
                                    Spray away.
-                              github.com/initstring
+                     github.com/Evilran/linkedin2username
 
 """
 
@@ -193,7 +193,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description=desc)
 
     parser.add_argument('-u', '--username', type=str, action='store',
-                        required=True,
+                        required=False,
                         help='A valid LinkedIn username.')
     parser.add_argument('-c', '--company', type=str, action='store',
                         required=True,
@@ -226,6 +226,9 @@ def parse_arguments():
                         'potentially bypassing the 1,000 record limit. '
                         '[example: "-k \'sales,human resources,information '
                         'technology\']')
+    parser.add_argument('-f', '--cookiefile', type=str, action="store",
+                        help='Path to a Netscape cookie file to import instead'
+                        ' of authenticating with username/password combo.')
     parser.add_argument('-g', '--geoblast', default=False, action="store_true",
                         help='Attempts to bypass the 1,000 record search limit'
                         ' by running multiple searches split across geographic'
@@ -251,12 +254,37 @@ def parse_arguments():
         print("Sorry, keywords and geoblast are currently not compatible. Use one or the other.")
         sys.exit()
 
+    # Either username or a cookie fill needs to be defined
+    if args.username == None and args.cookiefile == None:
+        print("Missing -u,--username or -f,--cookiefile arguments")
+        sys.exit()
+
+    # If we get a cookiefile then we can just continue without the password
+    if args.cookiefile != None:
+        return args
+
     # If password is not passed in the command line, prompt for it
     # in a more secure fashion (not shown on screen)
     args.password = args.password or getpass.getpass()
 
     return args
 
+
+def parseCookieFile(cookiefile):
+    """Parse a Netscape cookies file and return a dictionary of key value pairs
+    compatible with requests."""
+
+    cookies = []
+    with open(cookiefile, 'r') as fp:
+        for line in fp:
+            if not re.match(r'^\#', line):
+                lineFields = line.strip().split('\t')
+                subCookie = {}
+                subCookie["domain"] = lineFields[0]
+                subCookie["key"] = lineFields[5]
+                subCookie["value"] = lineFields[6]
+                cookies.append(subCookie)
+    return cookies
 
 def login(args):
     """Creates a new authenticated session.
@@ -276,6 +304,31 @@ def login(args):
 
     # The following are known errors that require the user to log in via the web
     login_problems = ['challenge', 'captcha', 'manage-account', 'add-email']
+
+
+    # Cookie file was passed in
+    if args.cookiefile != None:
+        if os.path.exists(args.cookiefile):
+
+            # Parse cookies from file
+            try:
+                cookies = parseCookieFile(args.cookiefile)
+            except Exception as e:
+                print("Failed to parse the cookie file: {0}".format(
+                    args.cookiefile))
+                print(str(e))
+                sys.exit(1)
+
+            # Add cookies to our session object
+            for cookie in cookies:
+                cookie_obj = requests.cookies.create_cookie(
+                    domain=cookie["domain"], name=cookie["key"], value=cookie["value"])
+                session.cookies.set_cookie(cookie_obj)
+
+            return session
+        else:
+            print("Cookie file {0} does not exist".format(args.cookiefile))
+            sys.exit(1)
 
     # Special options below when using a proxy server. Helpful for debugging
     # the application in Burp Suite.
@@ -321,8 +374,6 @@ def login(args):
     # Define a successful login by the 302 redirect to the 'feed' page. Try
     # to detect some other common logon failures and alert the user.
     if response.status_code in (302, 303):
-        # Add CSRF token for all additional requests
-        session = set_csrf_token(session)
         redirect = response.headers['Location']
         if 'feed' in redirect:
             return session
@@ -372,6 +423,8 @@ def set_csrf_token(session):
     return session
 
 
+
+
 def get_company_info(name, session):
     """Scrapes basic company info.
 
@@ -391,7 +444,7 @@ def get_company_info(name, session):
 
     if response.status_code != 200:
         print("[!] Unexpected HTTP response code when trying to get the company info:")
-        print(f"    {response.status_code}")
+        print(f"    [{response.status_code}] {response.text}")
         sys.exit()
 
     # Some geo regions are being fed a 'lite' version of LinkedIn mobile:
@@ -566,7 +619,7 @@ def find_employees(result):
                        ['miniProfile'])
         full_name = f"{profile['firstName']} {profile['lastName']}"
         employee = {'full_name': full_name,
-                    'occupation': profile['occupation']}
+                    'occupation': profile.get('occupation')}
 
         # Some employee names are not disclosed and return empty. We don't want those.
         if len(employee['full_name']) > 1:
@@ -613,6 +666,7 @@ def do_loops(session, company_id, outer_loops, args):
 
             # This is the inner loop. It will search results 25 at a time.
             for page in range(0, args.depth):
+                time.sleep(5)
                 new_names = 0
 
                 sys.stdout.flush()
@@ -636,7 +690,8 @@ def do_loops(session, company_id, outer_loops, args):
                 if not found_employees:
                     sys.stdout.write('\n')
                     print("[*] We have hit the end of the road! Moving on...")
-                    break
+                    # TODO: break
+                    continue
 
                 new_names += len(found_employees)
                 employee_list.extend(found_employees)
@@ -725,6 +780,8 @@ def main():
 
     print("[*] Successfully logged in.")
 
+    # Add CSRF token for all additional requests
+    session = set_csrf_token(session)
     # Get basic company info
     print("[*] Trying to get company info...")
     company_id, staff_count = get_company_info(args.company, session)
